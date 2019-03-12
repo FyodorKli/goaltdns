@@ -5,9 +5,16 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 	"sync"
 
 	"github.com/bobesa/go-domain-util/domainutil"
+	"github.com/subfinder/goaltdns/util"
+)
+
+var (
+	nbrRe = regexp.MustCompile("[0-9]+")
 )
 
 // AltDNS holds words, etc
@@ -92,6 +99,15 @@ func (a *AltDNS) insertWordsSubdomains(domain string, results chan string) {
 	}
 }
 
+func (a *AltDNS) expandNumbers(domain string, results chan string) {
+	for _, ind := range nbrRe.FindAllStringIndex(domain, -1) {
+		padSize := strconv.Itoa(ind[1] - ind[0])
+		for i := 1; i <= 10; i++ {
+			results <- fmt.Sprintf("%s%0"+padSize+"d%s", domain[:ind[0]], i, domain[ind[1]:])
+		}
+	}
+}
+
 // New Returns a new altdns object
 func New(wordList string) (*AltDNS, error) {
 	altdns := AltDNS{}
@@ -146,6 +162,13 @@ func (a *AltDNS) Permute(domain string) chan string {
 			a.insertWordsSubdomains(domain, results)
 		}(domain, results)
 
+		// Permute numbers 0x -> 01, 02, 03, ...
+		wg.Add(1)
+		go func(domain string, results chan string) {
+			defer wg.Done()
+			a.expandNumbers(domain, results)
+		}(domain, results)
+
 		wg.Wait()
 	}(domain)
 
@@ -155,27 +178,28 @@ func (a *AltDNS) Permute(domain string) chan string {
 func main() {
 	var wordlist, host, list, output string
 	hostList := []string{}
-	flag.StringVar(&host, "host", "", "Host to generate permutations for")
+	flag.StringVar(&host, "h", "", "Host to generate permutations for")
 	flag.StringVar(&list, "l", "", "List of hosts to generate permutations for")
 	flag.StringVar(&wordlist, "w", "words.txt", "Wordlist to generate permutations with")
 	flag.StringVar(&output, "o", "", "File to write permutation output to (optional)")
 
 	flag.Parse()
 
-	if host == "" && list == "" {
+	if host == "" && list == "" && !util.PipeGiven() {
 		fmt.Printf("%s: no host/hosts specified!\n", os.Args[0])
 		os.Exit(1)
 	}
 
 	if host != "" {
 		hostList = append(hostList, host)
-	} else if list != "" {
-		f, _ := os.Open(list)
-		scanner := bufio.NewScanner(f)
+	}
 
-		for scanner.Scan() {
-			hostList = append(hostList, scanner.Text())
-		}
+	if list != "" {
+		hostList = append(hostList, util.LinesInFile(list)...)
+	}
+
+	if util.PipeGiven() {
+		hostList = append(hostList, util.LinesInStdin()...)
 	}
 
 	var f *os.File
@@ -220,11 +244,6 @@ func main() {
 		jobs.Add(1)
 		go func(domain string) {
 			defer jobs.Done()
-
-			w := bufio.NewWriter(f)
-
-			defer w.Flush()
-
 			for r := range altdns.Permute(subdomain) {
 				permutation := fmt.Sprintf("%s.%s\n", r, domainSuffix)
 				if output == "" {
